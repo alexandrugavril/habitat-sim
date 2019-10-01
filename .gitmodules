@@ -46,3 +46,6 @@
 [submodule "docs/m.css"]
 	path = docs/m.css
 	url = https://github.com/mosra/m.css
+[submodule "PyTorch-YOLOv3"]
+	path = PyTorch-YOLOv3
+	url = https://github.com/eriklindernoren/PyTorch-YOLOv3.git
