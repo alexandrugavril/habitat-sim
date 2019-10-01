@@ -7,6 +7,7 @@ import math
 import multiprocessing
 import os
 import random
+import torch
 import sys
 import time
 from enum import Enum
@@ -32,6 +33,23 @@ class DemoRunner:
     def __init__(self, sim_settings, simulator_demo_type):
         if simulator_demo_type == DemoRunnerType.EXAMPLE:
             self.set_sim_settings(sim_settings)
+
+    def init_yolo(self, data_config, classes, weights_path):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        data_config = parse_data_config(data_config)
+        valid_path = data_config["valid"]
+        class_names = load_classes(classes)
+
+        # Initiate model
+        model = Darknet(opt.model_def).to(device)
+        if opt.weights_path.endswith(".weights"):
+            # Load darknet weights
+            model.load_darknet_weights(opt.weights_path)
+        else:
+            # Load checkpoint weights
+            model.load_state_dict(torch.load(opt.weights_path))
+
 
     def set_sim_settings(self, sim_settings):
         self._sim_settings = sim_settings.copy()
@@ -174,10 +192,14 @@ class DemoRunner:
                 + str(object_init_cell)
             )
 
-    def do_time_steps(self):
 
+
+
+
+    def do_time_steps(self):
         total_frames = 0
         start_time = time.time()
+        print(self._sim_settings)
         action_names = list(
             self._cfg.agents[self._sim_settings["default_agent"]].action_space.keys()
         )
@@ -188,11 +210,14 @@ class DemoRunner:
             print("active object ids: " + str(self._sim.get_existing_object_ids()))
 
         time_per_step = []
+        action = random.choice(action_names)
+        observations = self._sim.step(action)
+
+        print(observations)
 
         while total_frames < self._sim_settings["max_frames"]:
             if total_frames == 1:
                 start_time = time.time()
-            action = random.choice(action_names)
             if not self._sim_settings["silent"]:
                 print("action", action)
 
@@ -204,8 +229,20 @@ class DemoRunner:
             #        rand_nudge = np.random.uniform(-0.05,0.05,3)
             #        cur_pos = self._sim.get_translation(obj_id)
             #        self._sim.set_translation(cur_pos + rand_nudge, obj_id)
-            observations = self._sim.step(action)
             time_per_step.append(time.time() - start_step_time)
+            if self._sim_settings['display_frame']:
+                import cv2
+                cv2.imshow("Frame", observations["color_sensor"])
+                key = cv2.waitKey(0)
+                print(key)
+                if key == 82:
+                    action = 'move_forward'
+                elif key == 81:
+                    action = 'turn_left'
+                elif key == 83:
+                    action = 'turn_right'
+                print(action_names)
+            observations = self._sim.step(action)
 
             if self._sim_settings["save_png"]:
                 if self._sim_settings["color_sensor"]:
@@ -220,7 +257,12 @@ class DemoRunner:
             if not self._sim_settings["silent"]:
                 print("position\t", state.position, "\t", "rotation\t", state.rotation)
 
+            replica_pos, replica_rot = self.convert_habitat_to_replica(state.position, state.rotation)
+            print("Replica Pos:" + str(replica_pos) + " " + " Replica Rot:" + str(replica_rot))
+
             if self._sim_settings["compute_shortest_path"]:
+                print("Goal: " + str(self._sim_settings['goal_position']))
+
                 self.compute_shortest_path(
                     state.position, self._sim_settings["goal_position"]
                 )
@@ -287,6 +329,7 @@ class DemoRunner:
             print("Downloaded and extracted test scenes data.")
 
         self._sim = habitat_sim.Simulator(self._cfg)
+        print(self._sim.config)
 
         random.seed(self._sim_settings["seed"])
         self._sim.seed(self._sim_settings["seed"])
@@ -349,20 +392,55 @@ class DemoRunner:
             total_time=sum(res["total_time"]) / nprocs,
         )
 
+    def convert_habitat_to_replica(self, pos, rot):
+        import quaternion
+        # Define the transforms needed
+        _tmp = np.eye(3, dtype=np.float32)
+        UnitX = _tmp[0]
+        UnitY = _tmp[1]
+        UnitZ = _tmp[2]
+
+        R_hsim_replica = habitat_sim.utils.quat_from_two_vectors(-UnitZ, -UnitY)
+        T_hsim_replica = np.eye(4, dtype=np.float32)
+        T_hsim_replica[0:3, 0:3] = quaternion.as_rotation_matrix(R_hsim_replica)
+
+        R_forward_back = habitat_sim.utils.quat_from_two_vectors(-UnitZ, UnitZ)
+        T_replicac_hsimc = np.eye(4, dtype=np.float32)
+        T_replicac_hsimc[0:3, 0:3] = quaternion.as_rotation_matrix(R_forward_back)
+
+        # Transforming the state happens here
+        T_hsim_c = np.eye(4, dtype=np.float32)
+        T_hsim_c[0:3, 0:3] = quaternion.as_rotation_matrix(rot)
+        T_hsim_c[0:3, 3] = pos
+
+        T_c_hsim = np.linalg.inv(T_hsim_c)
+        T_c_replica = T_replicac_hsimc @ T_c_hsim @ T_hsim_replica
+
+        T_replica_c = np.linalg.inv(T_c_replica)
+
+        replica_pos = T_replica_c[0:3, 3]
+        replica_rot = quaternion.from_rotation_matrix(T_replica_c[0:3, 0:3])
+
+        return replica_pos, replica_rot
+
+
     def example(self):
         start_state = self.init_common()
 
         # initialize and compute shortest path to goal
         if self._sim_settings["compute_shortest_path"]:
             self._shortest_path = hsim.ShortestPath()
+
             self.compute_shortest_path(
                 start_state.position, self._sim_settings["goal_position"]
             )
+
 
         # set the goal headings, and compute action shortest path
         if self._sim_settings["compute_action_shortest_path"]:
             agent_id = self._sim_settings["default_agent"]
             goal_headings = self._sim_settings["goal_headings"]
+
             self._action_pathfinder = self._sim.make_action_pathfinder(agent_id)
 
             self._action_shortest_path = hsim.MultiGoalActionSpaceShortestPath()
@@ -390,6 +468,7 @@ class DemoRunner:
                     next_goal_idx += 1
 
             self._shortest_path.requested_end = self._sim_settings["goal_position"]
+            print("Goal: " + str(self._sim_settings['goal_position']))
             self._sim.pathfinder.find_path(self._shortest_path)
 
             self._action_pathfinder.find_path(self._action_shortest_path)
